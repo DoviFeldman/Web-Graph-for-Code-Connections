@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code Graph Visualizer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: white;
+            padding: 20px;
+        }
+        
+        .controls {
+            max-width: 1200px;
+            margin: 0 auto 20px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        h1 {
+            font-size: 24px;
+            font-weight: 600;
+            color: #333;
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        .file-input-wrapper {
+            position: relative;
+        }
+        
+        input[type="file"] {
+            padding: 8px 16px;
+            border: 2px solid #4A90E2;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .checkbox-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .checkbox-wrapper input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        
+        .checkbox-wrapper label {
+            font-size: 14px;
+            color: #333;
+            cursor: pointer;
+        }
+        
+        #graph-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        #graph {
+            width: 100%;
+            height: 85vh;
+            display: block;
+        }
+        
+        .node {
+            cursor: move;
+        }
+        
+        .node circle {
+            stroke: #333;
+            stroke-width: 2px;
+            transition: all 0.2s;
+        }
+        
+        .node:hover circle {
+            stroke-width: 3px;
+            filter: brightness(1.1);
+        }
+        
+        .node text {
+            font-size: 12px;
+            font-weight: 500;
+            pointer-events: none;
+            text-anchor: middle;
+            fill: #333;
+        }
+        
+        .link {
+            stroke: #999;
+            stroke-width: 1.5px;
+            fill: none;
+            marker-end: url(#arrowhead);
+        }
+        
+        .tooltip {
+            position: absolute;
+            padding: 10px 14px;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            border-radius: 6px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            max-width: 500px;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            line-height: 1.4;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            z-index: 1000;
+        }
+        
+        .placeholder {
+            text-align: center;
+            padding: 100px 20px;
+            color: #999;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <h1>Code Graph Visualizer</h1>
+        <div class="file-input-wrapper">
+            <input type="file" id="fileInput" accept=".ino,.cpp,.c,.h,.js,.py" />
+        </div>
+        <div class="checkbox-wrapper">
+            <input type="checkbox" id="showVariables" checked />
+            <label for="showVariables">Show Variables</label>
+        </div>
+    </div>
+    
+    <div id="graph-container">
+        <svg id="graph"></svg>
+        <div class="placeholder" id="placeholder">Upload a code file to visualize</div>
+    </div>
+    
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        let svg, link, node, tooltip;
+        let nodes = [];
+        let links = [];
+        let showVariables = true;
+        let codeContent = '';
+
+        const width = 1200;
+        const height = window.innerHeight * 0.85;
+
+        function initSVG() {
+            svg = d3.select('#graph')
+                .attr('width', width)
+                .attr('height', height);
+
+            svg.append('defs').append('marker')
+                .attr('id', 'arrowhead')
+                .attr('viewBox', '0 -5 10 10')
+                .attr('refX', 20)
+                .attr('refY', 0)
+                .attr('markerWidth', 6)
+                .attr('markerHeight', 6)
+                .attr('orient', 'auto')
+                .append('path')
+                .attr('d', 'M0,-5L10,0L0,5')
+                .attr('fill', '#999');
+
+            tooltip = d3.select('#tooltip');
+        }
+
+        function parseCode(code) {
+            codeContent = code;
+            const newNodes = [];
+            const newLinks = [];
+            const functionMap = new Map();
+            const variableSet = new Set();
+
+            // Find all function definitions
+            const functionRegex = /(?:void|int|float|double|bool|String|char)\s+(\w+)\s*\([^)]*\)\s*\{/g;
+            let match;
+            
+            while ((match = functionRegex.exec(code)) !== null) {
+                const funcName = match[1];
+                const funcStart = match.index;
+                const funcCode = extractFunctionBody(code, funcStart);
+                
+                functionMap.set(funcName, funcCode);
+                newNodes.push({
+                    id: funcName,
+                    type: 'function',
+                    code: funcCode,
+                    color: '#4A90E2',
+                    x: width / 2 + (Math.random() - 0.5) * 400,
+                    y: height / 2 + (Math.random() - 0.5) * 400
+                });
+            }
+
+            // Find global variables and objects
+            const globalVarRegex = /^(?:const\s+)?(?:int|float|double|bool|String|char|Servo|WebServer|WiFiClient)\s+(\w+)/gm;
+            while ((match = globalVarRegex.exec(code)) !== null) {
+                const varName = match[1];
+                if (!functionMap.has(varName) && varName !== 'rawliteral') {
+                    variableSet.add(varName);
+                    newNodes.push({
+                        id: varName,
+                        type: 'variable',
+                        code: match[0],
+                        color: '#7B68EE',
+                        x: width / 2 + (Math.random() - 0.5) * 400,
+                        y: height / 2 + (Math.random() - 0.5) * 400
+                    });
+                }
+            }
+
+            // Find function calls and variable usage
+            functionMap.forEach((funcCode, funcName) => {
+                // Check for function calls
+                functionMap.forEach((_, otherFunc) => {
+                    if (funcName !== otherFunc && funcCode.includes(otherFunc + '(')) {
+                        newLinks.push({ source: funcName, target: otherFunc });
+                    }
+                });
+
+                // Check for variable usage
+                variableSet.forEach(varName => {
+                    if (funcCode.includes(varName)) {
+                        newLinks.push({ source: funcName, target: varName });
+                    }
+                });
+            });
+
+            return { nodes: newNodes, links: newLinks };
+        }
+
+        function extractFunctionBody(code, startIndex) {
+            let braceCount = 0;
+            let inFunction = false;
+            let funcStart = -1;
+            let funcEnd = -1;
+
+            for (let i = startIndex; i < code.length; i++) {
+                if (code[i] === '{') {
+                    if (!inFunction) {
+                        funcStart = i;
+                        inFunction = true;
+                    }
+                    braceCount++;
+                } else if (code[i] === '}') {
+                    braceCount--;
+                    if (braceCount === 0 && inFunction) {
+                        funcEnd = i + 1;
+                        break;
+                    }
+                }
+            }
+
+            if (funcStart !== -1 && funcEnd !== -1) {
+                return code.substring(startIndex, funcEnd).trim();
+            }
+            return '';
+        }
+
+        function renderGraph() {
+            document.getElementById('placeholder').style.display = 'none';
+            svg.selectAll('*').remove();
+
+            // Re-add arrow marker
+            svg.append('defs').append('marker')
+                .attr('id', 'arrowhead')
+                .attr('viewBox', '0 -5 10 10')
+                .attr('refX', 20)
+                .attr('refY', 0)
+                .attr('markerWidth', 6)
+                .attr('markerHeight', 6)
+                .attr('orient', 'auto')
+                .append('path')
+                .attr('d', 'M0,-5L10,0L0,5')
+                .attr('fill', '#999');
+
+            const filteredNodes = showVariables ? nodes : nodes.filter(n => n.type !== 'variable');
+            const filteredLinks = links.filter(l => {
+                const sourceNode = nodes.find(n => n.id === l.source || n.id === l.source.id);
+                const targetNode = nodes.find(n => n.id === l.target || n.id === l.target.id);
+                if (!showVariables) {
+                    return sourceNode?.type !== 'variable' && targetNode?.type !== 'variable';
+                }
+                return true;
+            });
+
+            link = svg.append('g')
+                .selectAll('path')
+                .data(filteredLinks)
+                .join('path')
+                .attr('class', 'link');
+
+            node = svg.append('g')
+                .selectAll('g')
+                .data(filteredNodes, d => d.id)
+                .join('g')
+                .attr('class', 'node')
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended));
+
+            node.append('circle')
+                .attr('r', 35)
+                .attr('fill', d => d.color);
+
+            node.append('text')
+                .text(d => d.id)
+                .attr('dy', 4);
+
+            node.on('mouseenter', function(event, d) {
+                tooltip
+                    .style('opacity', 1)
+                    .html(d.code)
+                    .style('left', (event.pageX + 15) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+            })
+            .on('mousemove', function(event) {
+                tooltip
+                    .style('left', (event.pageX + 15) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+            })
+            .on('mouseleave', function() {
+                tooltip.style('opacity', 0);
+            });
+
+            updatePositions();
+        }
+
+        function updatePositions() {
+            const filteredNodes = showVariables ? nodes : nodes.filter(n => n.type !== 'variable');
+            
+            link.attr('d', d => {
+                const sourceNode = nodes.find(n => n.id === d.source || n.id === d.source.id);
+                const targetNode = nodes.find(n => n.id === d.target || n.id === d.target.id);
+                if (!sourceNode || !targetNode) return '';
+                return `M${sourceNode.x},${sourceNode.y}L${targetNode.x},${targetNode.y}`;
+            });
+
+            node.attr('transform', d => `translate(${d.x},${d.y})`);
+        }
+
+        function dragstarted(event, d) {
+            d3.select(this).raise();
+        }
+
+        function dragged(event, d) {
+            d.x = event.x;
+            d.y = event.y;
+            updatePositions();
+        }
+
+        function dragended(event, d) {
+            // Keep the position
+        }
+
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const code = event.target.result;
+                const result = parseCode(code);
+                nodes = result.nodes;
+                links = result.links;
+                renderGraph();
+            };
+            reader.readAsText(file);
+        });
+
+        document.getElementById('showVariables').addEventListener('change', function(e) {
+            showVariables = e.target.checked;
+            if (nodes.length > 0) {
+                renderGraph();
+            }
+        });
+
+        initSVG();
+    </script>
+</body>
+</html>
